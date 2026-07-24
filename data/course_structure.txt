@@ -1,0 +1,13 @@
+Course CS301: Operating Systems & Systems Programming
+Semester: Spring 2026
+Instructor: Dr. Aris Thorne
+Office Hours: Tuesdays and Thursdays 2:00 PM - 4:00 PM in Room 402.
+
+Grading Breakdown:
+- Midterm Exam: 25%
+- Final Project (RAG / Systems Implementation): 35%
+- Lab Assignments (4 total): 30%
+- Class Participation: 10%
+
+Late Policy:
+Submissions delayed by up to 24 hours incur a 10% penalty. No assignments are accepted after 48 hours without prior medical exemption approved by the department head.
