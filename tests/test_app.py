@@ -157,8 +157,12 @@ def test_system_prompt_has_question_placeholder():
 
 
 def test_system_prompt_has_sources_placeholder():
-    """Property 11 — {sources} placeholder must be present in the template."""
-    assert "{sources}" in SYSTEM_PROMPT_TEMPLATE
+    """Property 11 — template contains {context} and {question}; {sources} was removed.
+
+    Per Requirement 2.1: assert only {context} and {question} are present.
+    """
+    assert "{context}" in SYSTEM_PROMPT_TEMPLATE
+    assert "{question}" in SYSTEM_PROMPT_TEMPLATE
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +175,6 @@ def test_prompt_template_formats_to_nonempty_string():
     result = SYSTEM_PROMPT_TEMPLATE.format(
         context="ctx",
         question="q",
-        sources="- f.txt",
     )
     assert isinstance(result, str)
     assert len(result) > 0
@@ -181,23 +184,20 @@ def test_prompt_template_format_contains_supplied_values():
     """Property 12 (supplementary) — formatted prompt embeds the supplied values."""
     context = "Some document context."
     question = "What is the answer?"
-    sources = "- notes.txt"
 
     result = SYSTEM_PROMPT_TEMPLATE.format(
         context=context,
         question=question,
-        sources=sources,
     )
 
     assert context in result
     assert question in result
-    assert sources in result
 
 
 def test_prompt_template_raises_no_key_error_on_format():
     """Property 12 (supplementary) — .format() does not raise KeyError for valid placeholders."""
     try:
-        SYSTEM_PROMPT_TEMPLATE.format(context="ctx", question="q", sources="- f.txt")
+        SYSTEM_PROMPT_TEMPLATE.format(context="ctx", question="q")
     except KeyError as exc:
         raise AssertionError(f"Unexpected KeyError during template formatting: {exc}") from exc
 
@@ -624,19 +624,21 @@ def test_handle_query_llm_failure_calls_st_error():
     mock_st_markdown = MagicMock()
     mock_st_error = MagicMock()
 
-    def raise_llm_error(_):
-        raise RuntimeError("LLM error test")
-
     mock_retriever = MagicMock()
     mock_retriever.invoke.return_value = []
 
     mock_llm = MagicMock()
+    mock_llm.invoke.side_effect = RuntimeError("LLM error test")
+
+    mock_spinner = MagicMock()
+    mock_spinner.return_value.__enter__ = MagicMock(return_value=None)
+    mock_spinner.return_value.__exit__ = MagicMock(return_value=False)
 
     with patch.object(app_module.st, "chat_message", mock_chat_msg), \
          patch.object(app_module.st, "session_state", fake_session_state), \
          patch.object(app_module.st, "markdown", mock_st_markdown), \
          patch.object(app_module.st, "error", mock_st_error), \
-         patch.object(app_module.st, "write_stream", side_effect=raise_llm_error):
+         patch.object(app_module.st, "spinner", mock_spinner):
 
         handle_query("test query", mock_retriever, mock_llm)
 
@@ -667,19 +669,21 @@ def test_handle_query_llm_failure_no_assistant_message_appended():
 
     fake_session_state = {"messages": []}
 
-    def raise_llm_error(_):
-        raise RuntimeError("LLM error test")
-
     mock_retriever = MagicMock()
     mock_retriever.invoke.return_value = []
 
     mock_llm = MagicMock()
+    mock_llm.invoke.side_effect = RuntimeError("LLM error test")
+
+    mock_spinner = MagicMock()
+    mock_spinner.return_value.__enter__ = MagicMock(return_value=None)
+    mock_spinner.return_value.__exit__ = MagicMock(return_value=False)
 
     with patch.object(app_module.st, "chat_message", mock_chat_msg), \
          patch.object(app_module.st, "session_state", fake_session_state), \
          patch.object(app_module.st, "markdown", MagicMock()), \
          patch.object(app_module.st, "error", MagicMock()), \
-         patch.object(app_module.st, "write_stream", side_effect=raise_llm_error):
+         patch.object(app_module.st, "spinner", mock_spinner):
 
         handle_query("test query", mock_retriever, mock_llm)
 

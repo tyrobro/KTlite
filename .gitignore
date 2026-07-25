@@ -3,3 +3,6 @@ venv/
 chroma_db/
 __pycache__/
 .kiro/
+tests/
+.hypothesis/
+.pytest_cache/

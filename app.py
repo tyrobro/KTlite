@@ -9,7 +9,10 @@ from typing import TypedDict, Literal, List
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_chroma import Chroma
+from langchain_classic.retrievers import ContextualCompressionRetriever
+from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 
@@ -102,8 +105,15 @@ def get_retriever():
         persist_directory="./chroma_db",
         embedding_function=embeddings,
     )
-    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
-    return vector_store, retriever
+    base_retriever = vector_store.as_retriever(search_kwargs={"k": 10})
+
+    model = HuggingFaceCrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
+    compressor = CrossEncoderReranker(model=model, top_n=3)
+    compression_retriever = ContextualCompressionRetriever(
+        base_compressor=compressor,
+        base_retriever=base_retriever,
+    )
+    return vector_store, compression_retriever
 
 
 @st.cache_resource
