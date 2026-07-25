@@ -15,6 +15,7 @@ from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
+from langchain_classic.indexes import SQLRecordManager, index
 
 # ---------------------------------------------------------------------------
 # Logging configuration
@@ -139,9 +140,17 @@ def ingest_documents(data_dir: str = "./data", db_dir: str = "./chroma_db") -> N
     except OSError as e:
         raise RuntimeError(f"Cannot create vector store at {db_dir}: {e}") from e
 
+    # Initialise record manager for deduplication / sync (idempotent)
+    record_manager = SQLRecordManager(
+        namespace="chroma/rag_docs",
+        db_url="sqlite:///record_manager_cache.sql",
+    )
+    record_manager.create_schema()
+
     # Step 5 — Write
-    db.add_documents(chunks)
-    logger.info("Ingestion complete. %d chunk(s) written to %s.", len(chunks), db_dir)
+    index_result = index(chunks, record_manager, db, cleanup="full", source_id_key="source")
+    print(index_result)
+    logger.info("Ingestion complete: %s", index_result)
 
 
 # ---------------------------------------------------------------------------
