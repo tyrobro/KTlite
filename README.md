@@ -92,7 +92,7 @@ KTlite addresses this gap with a **Hybrid GraphRAG Architecture**. It extracts t
 
 1. The user submits a natural language query via Streamlit.
 2. The system executes a text-to-Cypher translation to retrieve the exact structural subgraph from Neo4j.
-3. *(Upcoming)* The system retrieves semantically similar chunks from ChromaDB and fuses them with the graph topology.
+3. The system simultaneously retrieves semantically similar chunks from ChromaDB and fuses them directly with the graph topology into a unified LLM prompt.
 4. The LLM synthesizes the combined context and streams the final, highly accurate response to the user.
 
 ```mermaid
@@ -184,7 +184,6 @@ Once running, simply type a natural language question into the Streamlit chat in
 
 ## Roadmap
 
-- [ ] Full fusion of vector + graph context in the retrieval phase
 - [ ] Support for additional document formats (DOCX, HTML)
 - [ ] Configurable LLM backend (swap Gemini for local models)
 - [ ] Evaluation suite for retrieval accuracy benchmarking
