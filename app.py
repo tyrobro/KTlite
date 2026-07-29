@@ -2,6 +2,8 @@
 app.py — KTlite RAG Chat GUI
 Phase 2: Streamlit-based conversational interface over the ChromaDB vector store.
 """
+from dotenv import load_dotenv
+load_dotenv()
 
 import os
 from typing import TypedDict, Literal, List
@@ -14,6 +16,33 @@ from langchain_classic.retrievers.document_compressors import CrossEncoderRerank
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_neo4j import GraphCypherQAChain, Neo4jGraph
+
+
+# ---------------------------------------------------------------------------
+# Cached LLM (defined here so it can be used at module level below)
+# ---------------------------------------------------------------------------
+
+@st.cache_resource
+def get_llm():
+    """
+    Initialise the Gemini LLM.
+    Decorated with @st.cache_resource so the client is created only once per
+    server process and reused on every rerun.
+
+    Returns:
+        ChatGoogleGenerativeAI: the LLM instance ready for .stream() calls.
+    """
+    return ChatGoogleGenerativeAI(model="gemini-3.5-flash")
+
+
+# ---------------------------------------------------------------------------
+# Module-level Neo4j connection, LLM, and chain
+# ---------------------------------------------------------------------------
+
+graph = Neo4jGraph(url="bolt://localhost:7687", username="neo4j", password="password")
+llm = get_llm()
+chain = GraphCypherQAChain.from_llm(llm=llm, graph=graph, verbose=True, allow_dangerous_requests=True)
 
 
 # ---------------------------------------------------------------------------
@@ -116,19 +145,6 @@ def get_retriever():
     return vector_store, compression_retriever
 
 
-@st.cache_resource
-def get_llm():
-    """
-    Initialise the Gemini LLM.
-    Decorated with @st.cache_resource so the client is created only once per
-    server process and reused on every rerun.
-
-    Returns:
-        ChatGoogleGenerativeAI: the LLM instance ready for .stream() calls.
-    """
-    return ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite")
-
-
 # ---------------------------------------------------------------------------
 # UI Components
 # ---------------------------------------------------------------------------
@@ -214,56 +230,77 @@ def handle_query(query: str, retriever, llm) -> None:
         st.markdown(query)
     st.session_state["messages"].append({"role": "user", "content": query})
 
-    # Step 2 — Retrieve chunks
-    docs = retriever.invoke(query)          # returns List[Document], len ∈ {0..3}
+    # ── COMMENTED OUT (Steps 2–4 of old pipeline) ──────────────────────────────
+    # # Step 2 — Retrieve chunks
+    # docs = retriever.invoke(query)          # returns List[Document], len ∈ {0..3}
+    #
+    # # Step 3 — Build Context Block and deduplicate sources
+    # context = build_context_block(docs)
+    # sources = build_sources(docs)
+    #
+    # # Step 4 — Format System Prompt
+    # prompt = SYSTEM_PROMPT_TEMPLATE.format(
+    #     context=context,
+    #     question=query,
+    # )
+    #
+    # # Step 5-6 — Stream LLM response
+    # with st.chat_message("assistant"):
+    #     try:
+    #         # Wait for the full response instead of streaming to avoid chunk parsing errors
+    #         with st.spinner("Thinking..."):
+    #             response = llm.invoke(prompt)
+    #
+    #         # Safely extract the text content
+    #         if isinstance(response.content, str):
+    #             full_response = response.content
+    #         elif isinstance(response.content, list):
+    #             # Handle cases where LangChain returns a list of content blocks
+    #             full_response = "".join(block.get("text", "") for block in response.content if isinstance(block, dict))
+    #         else:
+    #             full_response = str(response.content)
+    #
+    #         # Render the clean text to the UI
+    #         st.markdown(full_response)
+    #
+    #         # Display the retrieved files directly beneath the answer
+    #         if sources and sources != ["Unknown"]:
+    #             with st.expander("📚 **Retrieved Source Documents**"):
+    #                 for source in sources:
+    #                     st.caption(f"📄 `{source}`")
+    #
+    #     except Exception as exc:
+    #         st.error(f"LLM error: {exc}")
+    #         return   # do NOT append to session state
+    #
+    # # Step 7 — Persist assistant response
+    # st.session_state["messages"].append(
+    #     {
+    #         "role": "assistant",
+    #         "content": full_response,
+    #         "sources": sources if sources != ["Unknown"] else []
+    #     }
+    # )
+    # ───────────────────────────────────────────────────────────────────────────
 
-    # Step 3 — Build Context Block and deduplicate sources
-    context = build_context_block(docs)
-    sources = build_sources(docs)
+    # ── NEW: Graph retrieval ─────────────────────────────────────────────────
+    try:
+        raw_response = chain.invoke({"query": query})
+    except Exception as exc:
+        st.error(f"Graph chain error: {exc}")
+        return
 
-    # Step 4 — Format System Prompt
-    prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        context=context,
-        question=query,
-    )
+    full_response = raw_response.get("result", "") if isinstance(raw_response, dict) else ""
 
-    # Step 5-6 — Stream LLM response
     with st.chat_message("assistant"):
-        try:
-            # Wait for the full response instead of streaming to avoid chunk parsing errors
-            with st.spinner("Thinking..."):
-                response = llm.invoke(prompt)
-            
-            # Safely extract the text content
-            if isinstance(response.content, str):
-                full_response = response.content
-            elif isinstance(response.content, list):
-                # Handle cases where LangChain returns a list of content blocks
-                full_response = "".join(block.get("text", "") for block in response.content if isinstance(block, dict))
-            else:
-                full_response = str(response.content)
-
-            # Render the clean text to the UI
+        if full_response:
             st.markdown(full_response)
-            
-            # Display the retrieved files directly beneath the answer
-            if sources and sources != ["Unknown"]:
-                with st.expander("📚 **Retrieved Source Documents**"):
-                    for source in sources:
-                        st.caption(f"📄 `{source}`")
+        else:
+            st.info("No answer was returned from the graph.")
 
-        except Exception as exc:
-            st.error(f"LLM error: {exc}")
-            return   # do NOT append to session state
-
-    # Step 7 — Persist assistant response
-    st.session_state["messages"].append(
-        {
-            "role": "assistant", 
-            "content": full_response,
-            "sources": sources if sources != ["Unknown"] else []
-        }
-    )
+    if full_response:
+        st.session_state["messages"].append({"role": "assistant", "content": full_response})
+    # ────────────────────────────────────────────────────────────────────────
 
 
 # ---------------------------------------------------------------------------
@@ -289,11 +326,13 @@ def main() -> None:
         st.stop()
 
     # Step 3: Load vector store and retriever (cached)
-    try:
-        vector_store, retriever = get_retriever()
-    except Exception as exc:
-        st.error(f"Failed to load the vector store: {exc}")
-        st.stop()
+    # ── COMMENTED OUT ──────────────────────────────────────────────────────────
+    # try:
+    #     vector_store, retriever = get_retriever()
+    # except Exception as exc:
+    #     st.error(f"Failed to load the vector store: {exc}")
+    #     st.stop()
+    # ───────────────────────────────────────────────────────────────────────────
 
     # Step 4: Load LLM (cached)
     llm = get_llm()
@@ -309,7 +348,7 @@ def main() -> None:
 
     # Step 8: Chat input and query handling
     if query := st.chat_input("Ask a question about your documents..."):
-        handle_query(query, retriever, llm)
+        handle_query(query, None, llm)
 
 
 # Guard: run main() only when Streamlit executes this file as the active

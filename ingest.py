@@ -7,16 +7,22 @@ Usage:
     As a library : from ingest import ingest_documents
     As a script  : python ingest.py
 """
-
+from dotenv import load_dotenv
 import logging
+import os
+import time
 from pathlib import Path
 
-from langchain_community.document_loaders import TextLoader, PyPDFLoader
+from langchain_community.document_loaders import TextLoader, PDFPlumberLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_classic.indexes import SQLRecordManager, index
+from langchain_neo4j import Neo4jGraph
+from langchain_neo4j.graph_transformers.llm import LLMGraphTransformer
+from langchain_google_genai import ChatGoogleGenerativeAI
 
+load_dotenv()
 # ---------------------------------------------------------------------------
 # Logging configuration
 # ---------------------------------------------------------------------------
@@ -65,7 +71,7 @@ def _load_documents(file_paths: list) -> list:
             if suffix == ".txt":
                 loader = TextLoader(str(path), encoding="utf-8")
             elif suffix == ".pdf":
-                loader = PyPDFLoader(str(path))
+                loader = PDFPlumberLoader(str(path))
             else:
                 logger.error("Unsupported file type '%s': skipping", path.name)
                 continue
@@ -111,6 +117,44 @@ def _split_documents(documents: list) -> list:
     return chunks
 
 
+def _extract_graph_documents(
+    documents: list,
+    llm_transformer: LLMGraphTransformer,
+    graph: Neo4jGraph,
+) -> list:
+    """Run throttled per-document graph extraction and write results to graph store.
+
+    Returns the accumulated list of GraphDocument objects written to the store.
+    """
+    graph_documents: list = []
+    for doc in documents:
+        try:
+            result = llm_transformer.convert_to_graph_documents([doc])
+            if result:
+                graph_documents.extend(result)
+            else:
+                logger.warning(
+                    "No graph documents extracted from '%s'",
+                    doc.metadata.get("source", "unknown"),
+                )
+        except Exception as exc:
+            logger.error(
+                "Graph extraction failed for '%s': %s",
+                doc.metadata.get("source", "unknown"),
+                exc,
+            )
+        finally:
+            time.sleep(4)
+
+    graph.add_graph_documents(
+        graph_documents, baseEntityLabel=True, include_source=True
+    )
+    logger.info(
+        "Knowledge graph updated: %d graph document(s) stored.", len(graph_documents)
+    )
+    return graph_documents
+
+
 def ingest_documents(data_dir: str = "./data", db_dir: str = "./chroma_db") -> None:
     """
     Public entry point.  Orchestrates the full ingestion pipeline.
@@ -128,6 +172,15 @@ def ingest_documents(data_dir: str = "./data", db_dir: str = "./chroma_db") -> N
     if not documents:
         logger.warning("No documents successfully loaded.")
         return
+
+    # Initialise Neo4j connection and LLM graph transformer
+    graph = Neo4jGraph(url="bolt://localhost:7687", username="neo4j", password="password")
+    llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash", temperature=0)
+    llm_transformer = LLMGraphTransformer(llm=llm)
+
+    # Step 2.5 — Extract knowledge graph from full (un-split) documents
+    logger.info("Extracting knowledge graph from %d document(s)...", len(documents))
+    _extract_graph_documents(documents, llm_transformer, graph)
 
     # Step 3 — Split
     chunks = _split_documents(documents)

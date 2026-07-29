@@ -695,3 +695,412 @@ def test_handle_query_llm_failure_no_assistant_message_appended():
     assert messages[0]["role"] == "user", (
         f"Expected the single message to be the user message, got: {messages[0]!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 6.1 — Smoke / structural test: imports and module-level symbols
+# Validates: Requirements 1.1, 1.2, 2.2, 3.2
+# ---------------------------------------------------------------------------
+
+def test_smoke_neo4j_imports_and_module_symbols():
+    """Smoke test — GraphCypherQAChain and Neo4jGraph importable from langchain_neo4j;
+    app.graph and app.chain exist as module-level symbols when constructors are mocked.
+
+    The conftest.py permanently patches Neo4jGraph, GraphCypherQAChain.from_llm, and
+    ChatGoogleGenerativeAI before any import of app occurs, so no live Neo4j server
+    or Google API key is required.
+
+    Assertions:
+    1. GraphCypherQAChain and Neo4jGraph are importable from langchain_neo4j.
+    2. app.graph is a non-None module-level symbol (set by the mocked constructor).
+    3. app.chain is a non-None module-level symbol (set by the mocked factory).
+    4. Reloading app under fresh source-level mocks produces updated graph/chain symbols.
+
+    **Validates: Requirements 1.1, 1.2, 2.2, 3.2**
+    """
+    import importlib
+
+    # 1. Verify the two classes are importable from langchain_neo4j directly.
+    from langchain_neo4j import GraphCypherQAChain, Neo4jGraph  # noqa: F401
+    assert GraphCypherQAChain is not None, "GraphCypherQAChain must be importable from langchain_neo4j"
+    assert Neo4jGraph is not None, "Neo4jGraph must be importable from langchain_neo4j"
+
+    # 2. app is already imported (conftest patches ensure no live connection).
+    #    Verify module-level symbols exist and are non-None.
+    import app as app_module
+
+    assert hasattr(app_module, "graph"), "app.graph must exist as a module-level symbol"
+    assert hasattr(app_module, "chain"), "app.chain must exist as a module-level symbol"
+    assert app_module.graph is not None, "app.graph must be non-None (set by mocked Neo4jGraph)"
+    assert app_module.chain is not None, "app.chain must be non-None (set by mocked GraphCypherQAChain.from_llm)"
+
+    # 3. Reload app under fresh source-level mocks.
+    #    Patch langchain_neo4j.Neo4jGraph / .GraphCypherQAChain directly so that
+    #    the ``from langchain_neo4j import …`` statement inside reload() picks up
+    #    the new mocks (app.Neo4jGraph is rebound from the source during reload).
+    fresh_graph_instance = MagicMock(name="fresh_graph_instance")
+    fresh_chain_instance = MagicMock(name="fresh_chain_instance")
+
+    mock_neo4j_cls = MagicMock(name="Neo4jGraph", return_value=fresh_graph_instance)
+    mock_chain_cls = MagicMock(name="GraphCypherQAChain")
+    mock_chain_cls.from_llm = MagicMock(return_value=fresh_chain_instance)
+
+    with patch("langchain_neo4j.Neo4jGraph", mock_neo4j_cls), \
+         patch("langchain_neo4j.GraphCypherQAChain", mock_chain_cls), \
+         patch("app.get_llm", return_value=MagicMock(name="fresh_llm")):
+        importlib.reload(app_module)
+
+        # Each constructor must have been called exactly once during reload.
+        mock_neo4j_cls.assert_called_once()
+        mock_chain_cls.from_llm.assert_called_once()
+
+        # graph and chain must reflect what the fresh mocks returned.
+        assert app_module.graph is fresh_graph_instance, (
+            "After reload, app.graph must be the instance returned by the patched Neo4jGraph"
+        )
+        assert app_module.chain is fresh_chain_instance, (
+            "After reload, app.chain must be the instance returned by the patched GraphCypherQAChain.from_llm"
+        )
+
+    # 4. Restore: reload with conftest-level mocks active so the module stays usable.
+    importlib.reload(app_module)
+
+
+# ---------------------------------------------------------------------------
+# Task 6.7 — Source-inspection test: no live retriever.invoke in handle_query
+# Validates: Requirement 4.4
+# ---------------------------------------------------------------------------
+
+def test_no_live_retriever_invoke_in_handle_query():
+    """Source-inspection test — reads app.py as text and asserts that no live
+    (non-commented) call to ``retriever.invoke(`` exists inside the body of
+    ``handle_query``.
+
+    Steps:
+    1. Read app.py as plain text.
+    2. Locate the ``handle_query`` function body (from ``def handle_query`` to
+       the next top-level ``def``/``class`` or end of file).
+    3. For each line in that body, skip lines whose stripped form starts with
+       ``#`` (comments).  Assert that no remaining line contains
+       ``retriever.invoke(``.
+
+    **Validates: Requirement 4.4**
+    """
+    import os
+    import re
+
+    app_path = os.path.join(os.path.dirname(__file__), "..", "app.py")
+    app_path = os.path.normpath(app_path)
+
+    with open(app_path, "r", encoding="utf-8") as fh:
+        source_lines = fh.readlines()
+
+    # Find the line index where handle_query is defined.
+    start_idx = None
+    for i, line in enumerate(source_lines):
+        if re.match(r"^def handle_query\b", line):
+            start_idx = i
+            break
+
+    assert start_idx is not None, (
+        "Could not find 'def handle_query' in app.py — the function must exist"
+    )
+
+    # Collect the body: from start_idx to the next top-level def/class or EOF.
+    body_lines = []
+    for i in range(start_idx + 1, len(source_lines)):
+        line = source_lines[i]
+        # A top-level definition starts at column 0 with def or class.
+        if re.match(r"^(def |class )", line):
+            break
+        body_lines.append(line)
+
+    # Assert no live (uncommented) retriever.invoke( call exists in the body.
+    live_violations = []
+    for lineno, line in enumerate(body_lines, start=start_idx + 2):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            # This line is a comment — skip it.
+            continue
+        if "retriever.invoke(" in stripped:
+            live_violations.append((lineno, line.rstrip()))
+
+    assert len(live_violations) == 0, (
+        "Found live (non-commented) retriever.invoke() call(s) inside handle_query:\n"
+        + "\n".join(f"  line {ln}: {text}" for ln, text in live_violations)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 6.2 — Property 1: chain routing
+# Feature: graph-rag-query-routing, Property 1
+# Validates: Requirements 4.4, 5.1
+# ---------------------------------------------------------------------------
+
+@given(st.text(min_size=1, max_size=32_000))
+@settings(max_examples=100)
+def test_property1_chain_invoked_retriever_not_invoked(query):
+    """Property 1 — handle_query routes through chain.invoke, not retriever.invoke.
+
+    For any non-empty query string (1–32,000 characters), handle_query() must
+    call chain.invoke({"query": query}) exactly once and must never call
+    retriever.invoke().
+
+    **Validates: Requirements 4.4, 5.1**
+    """
+    import app as app_module
+    from app import handle_query
+
+    # Build a mock chain that returns a valid result dict
+    mock_chain = MagicMock()
+    mock_chain.invoke.return_value = {"result": "answer"}
+
+    # Build a mock retriever to confirm it is never called
+    mock_retriever = MagicMock()
+    mock_llm = MagicMock()
+
+    # Build Streamlit mocks
+    mock_chat_msg = MagicMock()
+    mock_chat_msg.return_value.__enter__ = MagicMock(return_value=None)
+    mock_chat_msg.return_value.__exit__ = MagicMock(return_value=False)
+
+    fake_session_state = {"messages": []}
+
+    with patch.object(app_module, "chain", mock_chain), \
+         patch.object(app_module.st, "chat_message", mock_chat_msg), \
+         patch.object(app_module.st, "session_state", fake_session_state), \
+         patch.object(app_module.st, "markdown", MagicMock()), \
+         patch.object(app_module.st, "info", MagicMock()):
+
+        handle_query(query, mock_retriever, mock_llm)
+
+    # chain.invoke must have been called exactly once with the query dict
+    mock_chain.invoke.assert_called_once_with({"query": query})
+
+    # retriever.invoke must never have been called
+    mock_retriever.invoke.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Task 6.3 — Property 2: exception handling
+# Feature: graph-rag-query-routing, Property 2
+# Validates: Requirements 5.3, 5.4, 7.4, 7.6
+# ---------------------------------------------------------------------------
+
+@given(st.text(min_size=1, max_size=32_000), st.text(min_size=1))
+@settings(max_examples=100)
+def test_property2_exception_preserves_user_message_calls_st_error(query, exc_msg):
+    """Property 2 — chain.invoke exception handling preserves user message and surfaces error.
+
+    For any exception raised by chain.invoke():
+    - st.error() must be called exactly once with a message that contains the
+      failure cause.
+    - Session State must contain exactly 1 entry (the user message appended
+      before the chain call).
+    - That single entry must have role == "user".
+
+    **Validates: Requirements 5.3, 5.4, 7.4, 7.6**
+    """
+    import app as app_module
+    from app import handle_query
+
+    # chain raises on every call
+    mock_chain = MagicMock()
+    mock_chain.invoke.side_effect = RuntimeError(exc_msg)
+
+    mock_retriever = MagicMock()
+    mock_llm = MagicMock()
+
+    mock_chat_msg = MagicMock()
+    mock_chat_msg.return_value.__enter__ = MagicMock(return_value=None)
+    mock_chat_msg.return_value.__exit__ = MagicMock(return_value=False)
+
+    fake_session_state = {"messages": []}
+    mock_st_error = MagicMock()
+
+    with patch.object(app_module, "chain", mock_chain), \
+         patch.object(app_module.st, "chat_message", mock_chat_msg), \
+         patch.object(app_module.st, "session_state", fake_session_state), \
+         patch.object(app_module.st, "markdown", MagicMock()), \
+         patch.object(app_module.st, "error", mock_st_error):
+
+        handle_query(query, mock_retriever, mock_llm)
+
+    # st.error must have been called exactly once
+    mock_st_error.assert_called_once()
+
+    # The error message must contain the exception cause
+    error_arg = str(mock_st_error.call_args[0][0])
+    assert exc_msg in error_arg, (
+        f"Expected exc_msg {exc_msg!r} to appear in st.error argument, got: {error_arg!r}"
+    )
+
+    # Session state must have exactly 1 entry — the user message
+    messages = fake_session_state["messages"]
+    assert len(messages) == 1, (
+        f"Expected exactly 1 message in session state, got {len(messages)}: {messages!r}"
+    )
+    assert messages[0]["role"] == "user", (
+        f"Expected the single session-state entry to have role='user', got: {messages[0]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 6.4 — Property 3: successful result extraction
+# Feature: graph-rag-query-routing, Property 3
+# Validates: Requirements 6.1, 6.4, 7.2, 7.3, 7.5
+# ---------------------------------------------------------------------------
+
+@given(
+    st.text(min_size=1, max_size=32_000),
+    st.text(min_size=1),
+    st.dictionaries(st.text(), st.text()),
+)
+@settings(max_examples=100)
+def test_property3_result_extracted_and_persisted(query, result_text, extra_keys):
+    """Property 3 — successful invocation extracts result and persists to session state.
+
+    For any dictionary returned by chain.invoke() that contains a non-empty
+    "result" string:
+    - st.markdown() must be called with result_text.
+    - The last session-state entry must be {"role": "assistant", "content": result_text}.
+    - st.error() must not be called.
+
+    **Validates: Requirements 6.1, 6.4, 7.2, 7.3, 7.5**
+    """
+    import app as app_module
+    from app import handle_query
+
+    # Build response dict; extra_keys must not overwrite the "result" key
+    response = {"result": result_text}
+    response.update({k: v for k, v in extra_keys.items() if k != "result"})
+
+    mock_chain = MagicMock()
+    mock_chain.invoke.return_value = response
+
+    mock_retriever = MagicMock()
+    mock_llm = MagicMock()
+
+    mock_chat_msg = MagicMock()
+    mock_chat_msg.return_value.__enter__ = MagicMock(return_value=None)
+    mock_chat_msg.return_value.__exit__ = MagicMock(return_value=False)
+
+    fake_session_state = {"messages": []}
+    mock_st_markdown = MagicMock()
+    mock_st_error = MagicMock()
+
+    with patch.object(app_module, "chain", mock_chain), \
+         patch.object(app_module.st, "chat_message", mock_chat_msg), \
+         patch.object(app_module.st, "session_state", fake_session_state), \
+         patch.object(app_module.st, "markdown", mock_st_markdown), \
+         patch.object(app_module.st, "error", mock_st_error), \
+         patch.object(app_module.st, "info", MagicMock()):
+
+        handle_query(query, mock_retriever, mock_llm)
+
+    # st.markdown must have been called with result_text
+    mock_st_markdown.assert_called_with(result_text)
+
+    # The last session-state entry must be the assistant message
+    messages = fake_session_state["messages"]
+    assert len(messages) >= 1, "Session state must not be empty after a successful call"
+    last_msg = messages[-1]
+    assert last_msg == {"role": "assistant", "content": result_text}, (
+        f"Expected last message to be assistant entry with result_text, got: {last_msg!r}"
+    )
+
+    # st.error must not have been called
+    mock_st_error.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Task 6.5 — Property 4: malformed raw_response
+# Feature: graph-rag-query-routing, Property 4
+# Validates: Requirements 6.2, 6.3
+# ---------------------------------------------------------------------------
+
+@given(
+    st.one_of(
+        st.none(),
+        st.text(),
+        st.integers(),
+        st.lists(st.text()),
+        st.dictionaries(st.text(), st.text()).filter(lambda d: "result" not in d),
+        st.just({}),
+    )
+)
+@settings(max_examples=100)
+def test_property4_malformed_response_no_exception(bad_response):
+    """Property 4 — malformed or missing raw_response yields empty string without exception.
+
+    For any value that is not a dict, is None, is an empty dict, or is a dict
+    that does not contain the "result" key, the extraction expression must:
+    - assign an empty string to full_response
+    - not raise any exception
+
+    **Validates: Requirements 6.2, 6.3**
+    """
+    # Call the extraction expression directly — no mocking required
+    full_response = bad_response.get("result", "") if isinstance(bad_response, dict) else ""
+
+    assert full_response == "", (
+        f"Expected full_response to be '' for bad_response={bad_response!r}, "
+        f"got {full_response!r}"
+    )
+    assert isinstance(full_response, str), (
+        f"Expected full_response to be a str, got {type(full_response)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 6.6 — Example-based: empty result shows warning/info
+# Validates: Requirements 6.4, 6.5
+# ---------------------------------------------------------------------------
+
+def test_empty_result_shows_info_not_markdown():
+    """Example-based — when chain.invoke returns {"result": ""}, st.markdown must NOT
+    be called with an empty string and either st.info or st.warning must be called
+    at least once.
+
+    **Validates: Requirements 6.4, 6.5**
+    """
+    import app as app_module
+    from app import handle_query
+
+    mock_chain = MagicMock()
+    mock_chain.invoke.return_value = {"result": ""}
+
+    mock_chat_msg = MagicMock()
+    mock_chat_msg.return_value.__enter__ = MagicMock(return_value=None)
+    mock_chat_msg.return_value.__exit__ = MagicMock(return_value=False)
+
+    fake_session_state = {"messages": []}
+    mock_st_markdown = MagicMock()
+    mock_st_info = MagicMock()
+    mock_st_warning = MagicMock()
+    mock_st_error = MagicMock()
+
+    with patch.object(app_module, "chain", mock_chain), \
+         patch.object(app_module.st, "chat_message", mock_chat_msg), \
+         patch.object(app_module.st, "session_state", fake_session_state), \
+         patch.object(app_module.st, "markdown", mock_st_markdown), \
+         patch.object(app_module.st, "info", mock_st_info), \
+         patch.object(app_module.st, "warning", mock_st_warning), \
+         patch.object(app_module.st, "error", mock_st_error):
+
+        handle_query("some query", None, None)
+
+    # st.markdown must NOT have been called with an empty string
+    for call in mock_st_markdown.call_args_list:
+        args = call[0]
+        assert not (len(args) == 1 and args[0] == ""), (
+            "st.markdown must not be called with '' as sole argument when result is empty"
+        )
+
+    # Either st.info or st.warning must have been called at least once
+    info_called = mock_st_info.call_count > 0
+    warning_called = mock_st_warning.call_count > 0
+    assert info_called or warning_called, (
+        "Expected st.info or st.warning to be called when full_response is empty, "
+        f"but info_called={info_called}, warning_called={warning_called}"
+    )

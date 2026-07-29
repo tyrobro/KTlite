@@ -6,3 +6,6 @@ __pycache__/
 tests/
 .hypothesis/
 .pytest_cache/
+*.sql
+*.pdf
+data/
